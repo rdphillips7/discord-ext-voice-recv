@@ -142,6 +142,9 @@ class PacketDecoder:
         
         member = self._get_cached_member()
 
+        if packet.payload != 120:
+            return
+
         if member is None:
             self._cached_id = self.sink.voice_client._get_id_from_ssrc(self.ssrc)  # type: ignore
             member = self._get_cached_member()
