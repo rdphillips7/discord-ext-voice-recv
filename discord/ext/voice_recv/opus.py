@@ -139,19 +139,22 @@ class PacketDecoder:
 
     def _process_packet(self, packet: AudioPacket) -> VoiceData:
         pcm = None
-        
-        member = self._get_cached_member()
 
-        if packet.payload != 120:
-            return
+        member = self._get_cached_member()
 
         if member is None:
             self._cached_id = self.sink.voice_client._get_id_from_ssrc(self.ssrc)  # type: ignore
             member = self._get_cached_member()
 
         if has_dave and not packet.is_silence() and packet.decrypted_data is not None and self.vc._connection.dave_session is not None and self.vc._connection.dave_session.ready:
-            packet.decrypted_data = self.vc._connection.dave_session.decrypt(member.id, MediaType.audio,
-                                                                             bytes(packet.decrypted_data))  # type: ignore
+            try:
+                packet.decrypted_data = self.vc._connection.dave_session.decrypt(member.id, MediaType.audio,
+                                                                                bytes(
+                                                                                    packet.decrypted_data))  # type: ignore
+            except:
+                self._last_seq = packet.sequence
+                self._last_ts = packet.timestamp
+                return VoiceData(packet, None, pcm=b'')
 
         if not self.sink.wants_opus():
             packet, pcm = self._decode_packet(packet)
@@ -167,7 +170,10 @@ class PacketDecoder:
 
         # Decode as per usual
         if packet:
-            pcm = self._decoder.decode(packet.decrypted_data, fec=False)
+            try:
+                pcm = self._decoder.decode(packet.decrypted_data, fec=False)
+            except:
+                pcm = self._decoder.decode(None, fec=False)
             return packet, pcm
 
         # Fake packet, need to check next one to use fec
