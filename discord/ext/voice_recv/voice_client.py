@@ -17,7 +17,7 @@ from .reader import AudioReader
 from .sinks import AudioSink
 
 if TYPE_CHECKING:
-    from typing import Optional, Dict, Any, Union
+    from typing import Optional, Dict, Any, Union, Set
     from discord.ext.commands._types import CoroFunc
     from .reader import AfterCB
 
@@ -41,6 +41,11 @@ class VoiceRecvClient(discord.VoiceClient):
         self._ssrc_to_id: Dict[int, int] = {}
         self._id_to_ssrc: Dict[int, int] = {}
         self._event_listeners: Dict[str, list] = {}
+        # 0.5.5a: user ids the VOICE SERVER says are connected to this call
+        # (ops 11/12/5 add, 13 removes, READY resets). The gateway's voice
+        # states also list people still stuck connecting (e.g. blocked UDP),
+        # who are in the channel but not in the call or its DAVE group.
+        self._voice_connected: Set[int] = set()
 
     def create_connection_state(self) -> VoiceConnectionState:
         return VoiceConnectionState(self, hook=hook)
@@ -133,6 +138,12 @@ class VoiceRecvClient(discord.VoiceClient):
 
     def _get_id_from_ssrc(self, ssrc: int) -> Optional[int]:
         return self._ssrc_to_id.get(ssrc)
+
+    def voice_connected_ids(self) -> Set[int]:
+        """User ids the voice server reports as connected to this call
+        (0.5.5a). People listed in the channel's voice states but missing
+        here are still connecting (or can't: blocked UDP, broken VPN)."""
+        return set(self._voice_connected)
 
     def listen(self, sink: AudioSink, *, after: Optional[AfterCB] = None) -> None:
         """Receives audio into a :class:`AudioSink`."""
