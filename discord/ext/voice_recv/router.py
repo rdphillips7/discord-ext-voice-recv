@@ -37,6 +37,7 @@ class PacketRouter(threading.Thread):
         self._lock: threading.RLock = threading.RLock()
         self._end_thread: threading.Event = threading.Event()
         self._dropped_ssrcs: deque[int] = deque(maxlen=16)
+        self._retired_stats: Dict[str, int] = {}
 
     def feed_rtp(self, packet: RTPPacket) -> None:
         # TODO: stale packet check
@@ -81,6 +82,8 @@ class PacketRouter(threading.Thread):
         with self._lock:
             decoder = self.decoders.pop(ssrc, None)
             if decoder is not None:
+                for k, v in getattr(decoder._buffer, 'stats', {}).items():
+                    self._retired_stats[k] = self._retired_stats.get(k, 0) + v
                 self._dropped_ssrcs.append(ssrc)
                 decoder.destroy()
 
@@ -103,14 +106,34 @@ class PacketRouter(threading.Thread):
             self.reader.voice_client.stop_listening()
             self.waiter.clear()
 
+    # 0.5.6a: the jitter buffer releases a gap after a short wait even when
+    # no new packet arrives (the end of an utterance), so wake periodically
+    # and re-check decoders that are holding packets behind a gap
+    RECHECK_INTERVAL = 0.02
+
     def _do_run(self) -> None:
         while not self._end_thread.is_set():
-            self.waiter.wait()
+            self.waiter.wait(self.RECHECK_INTERVAL)
             with self._lock:
+                for decoder in list(self.decoders.values()):
+                    if len(decoder._buffer):
+                        decoder._flag_ready_state()
                 for decoder in self.waiter.items:
-                    data = decoder.pop_data()
-                    if data is not None and data.source is not None:
-                        self.sink.write(data.source, data)
+                    while True:
+                        data = decoder.pop_data()
+                        if data is None:
+                            break
+                        if data.source is not None:
+                            self.sink.write(data.source, data)
+
+    def buffer_stats(self) -> Dict[str, int]:
+        """Totals across this router's jitter buffers (0.5.6a)."""
+        with self._lock:
+            out: Dict[str, int] = dict(self._retired_stats)
+            for decoder in self.decoders.values():
+                for k, v in getattr(decoder._buffer, 'stats', {}).items():
+                    out[k] = out.get(k, 0) + v
+        return out
 
 
 class SinkEventRouter(threading.Thread):

@@ -6,7 +6,7 @@ import logging
 
 from typing import TYPE_CHECKING, Final
 
-from .buffer import HeapJitterBuffer as JitterBuffer
+from .buffer import ReorderJitterBuffer as JitterBuffer   # 0.5.6a
 from .rtp import FakePacket
 from .utils import add_wrapped
 
@@ -69,6 +69,9 @@ class PacketDecoder:
 
         self._last_seq: int = -1
         self._last_ts: int = -1
+        # 0.5.6a: a packet DAVE-decrypted early (as the FEC source for the
+        # concealed packet before it) must not be decrypted a second time
+        self._dave_plain: Optional[Tuple[int, bytes]] = None
 
     @property
     def sink(self) -> AudioSink:
@@ -115,27 +118,21 @@ class PacketDecoder:
         self._flag_ready_state()
 
     def _get_next_packet(self, timeout: float) -> Optional[AudioPacket]:
-        packet = self._buffer.pop(timeout=timeout)
+        # 0.5.6a: the buffer decides when a gap is lost and returns a
+        # FakePacket for it (concealed below); nothing is flushed/discarded
+        return self._buffer.pop(timeout=timeout)
 
-        if packet is None:
-            # Gets the last (buffered) packet out (i think)
-            # TODO: revist this, might be an issue
-            if self._buffer:
-                packets = self._buffer.flush()
-                if any(packets[1:]):
-                    log.warning(
-                        "%s packets were lost being flushed in decoder-%s\n --> (last=%s) %s",
-                        len(packets) - 1,
-                        self.ssrc,
-                        self._last_seq,
-                        [p.sequence for p in packets],
-                    )
-                return packets[0]
-            return
-        elif not packet:
-            packet = self._make_fakepacket()
+    def _dave_active(self) -> bool:
+        ds = getattr(self.vc._connection, 'dave_session', None)
+        return has_dave and ds is not None and ds.ready
 
-        return packet
+    def _dave_decrypt(self, member, packet) -> bytes:
+        cached = self._dave_plain
+        if cached is not None and cached[0] == packet.sequence:
+            self._dave_plain = None
+            return cached[1]
+        return self.vc._connection.dave_session.decrypt(  # type: ignore
+            member.id, MediaType.audio, bytes(packet.decrypted_data))
 
     def _make_fakepacket(self) -> FakePacket:
         seq = add_wrapped(self._last_seq, 1)
@@ -151,11 +148,9 @@ class PacketDecoder:
             self._cached_id = self.sink.voice_client._get_id_from_ssrc(self.ssrc)  # type: ignore
             member = self._get_cached_member()
 
-        if has_dave and not packet.is_silence() and packet.decrypted_data is not None and self.vc._connection.dave_session is not None and self.vc._connection.dave_session.ready:
+        if packet and not packet.is_silence() and packet.decrypted_data is not None and self._dave_active():
             try:
-                packet.decrypted_data = self.vc._connection.dave_session.decrypt(member.id, MediaType.audio,
-                                                                                bytes(
-                                                                                    packet.decrypted_data))  # type: ignore
+                packet.decrypted_data = self._dave_decrypt(member, packet)
             except Exception:
                 # counted so callers can tell a dead DAVE session from silence
                 reader = getattr(self.router, 'reader', None)
@@ -166,7 +161,7 @@ class PacketDecoder:
                 return VoiceData(packet, None, pcm=b'')
 
         if not self.sink.wants_opus():
-            packet, pcm = self._decode_packet(packet)
+            packet, pcm = self._decode_packet(packet, member)
 
         data = VoiceData(packet, member, pcm=pcm)
         self._last_seq = packet.sequence
@@ -174,7 +169,7 @@ class PacketDecoder:
 
         return data
 
-    def _decode_packet(self, packet: AudioPacket) -> Tuple[AudioPacket, bytes]:
+    def _decode_packet(self, packet: AudioPacket, member=None) -> Tuple[AudioPacket, bytes]:
         assert self._decoder is not None
 
         # Decode as per usual
@@ -188,17 +183,32 @@ class PacketDecoder:
         # Fake packet, need to check next one to use fec
         next_packet = self._buffer.peek_next()
 
+        nextdata: Optional[bytes] = None
         if next_packet is not None:
-            nextdata: bytes = next_packet.decrypted_data  # type: ignore
+            nextdata = next_packet.decrypted_data  # type: ignore
+            if self._dave_active() and member is not None and not next_packet.is_silence():
+                # FEC lives inside the next frame's payload: it must be
+                # DAVE-decrypted first (cached so it isn't decrypted twice)
+                try:
+                    plain = self._dave_decrypt(member, next_packet)
+                    self._dave_plain = (next_packet.sequence, plain)
+                    nextdata = plain
+                except Exception:
+                    nextdata = None
+
+        if nextdata:
 
             log.debug(
                 "Generating fec packet: fake=%s, fec=%s",
                 packet.sequence,
                 next_packet.sequence,
             )
-            pcm = self._decoder.decode(nextdata, fec=True)
+            try:
+                pcm = self._decoder.decode(nextdata, fec=True)
+            except Exception:
+                pcm = self._decoder.decode(None, fec=False)
 
-        # Need to drop a packet
+        # no usable next packet: packet-loss concealment
         else:
             pcm = self._decoder.decode(None, fec=False)
 

@@ -131,6 +131,8 @@ class AudioReader:
             'crypto_errors': self.crypto_errors,
             'key_resyncs': self.key_resyncs,
             'dave_failures': self.dave_failures,
+            # 0.5.6a jitter buffer: released / concealed / skipped / late ...
+            'jitter': self.packet_router.buffer_stats(),
             'last_decrypt_ok_age': (time.monotonic() - self.last_decrypt_ok) if self.last_decrypt_ok else None,
         }
 
