@@ -63,6 +63,8 @@ async def hook(self: DiscordVoiceWebSocket, msg: Dict[str, Any]):
             log.info("WS payload has extra keys: %s", m)
 
     if op == self.READY:
+        # a new voice session: the server re-sends who is connected (op 11)
+        vc._voice_connected.clear()
         vc._add_ssrc(vc.guild.me.id, data['ssrc'])
 
     elif op == self.SESSION_DESCRIPTION:
@@ -76,12 +78,14 @@ async def hook(self: DiscordVoiceWebSocket, msg: Dict[str, Any]):
         uid = int(data['user_id'])
         ssrc = data['ssrc']
         vc._add_ssrc(uid, ssrc)
+        vc._voice_connected.add(uid)
         member = vc.guild.get_member(uid)
         state = try_enum(SpeakingState, data['speaking'])
         vc.dispatch("voice_member_speaking_state", member, ssrc, state)
 
     elif op == CLIENT_CONNECT:
         uids = [int(uid) for uid in data['user_ids']]
+        vc._voice_connected.update(uids)
 
         # Multiple user IDs means this is the initial member list
         for uid in uids:
@@ -91,12 +95,14 @@ async def hook(self: DiscordVoiceWebSocket, msg: Dict[str, Any]):
     elif op == VIDEO:
         uid = int(data['user_id'])
         vc._add_ssrc(uid, data['audio_ssrc'])
+        vc._voice_connected.add(uid)
         member = vc.guild.get_member(uid)
         streams = VoiceVideoStreams(data=cast('VoiceVideoPayload', data), vc=vc)
         vc.dispatch("voice_member_video", member, streams)
 
     elif op == CLIENT_DISCONNECT:
         uid = int(data['user_id'])
+        vc._voice_connected.discard(uid)
         ssrc = vc._get_ssrc_from_id(uid)
 
         if vc._reader and ssrc is not None:
