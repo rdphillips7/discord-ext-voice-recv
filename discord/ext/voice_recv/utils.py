@@ -190,14 +190,15 @@ class MultiDataEvent(Generic[_dataT]):
         return self._ready.wait(timeout)
 
     def register(self, item: _dataT) -> None:
-        self._items.append(item)
+        # 0.5.6a: idempotent. Every push re-registered the decoder, so a
+        # decoder could sit in the list several times; one unregister then
+        # left it "ready" with nothing to pop and the router spun.
+        if item not in self._items:
+            self._items.append(item)
         self._ready.set()
 
     def unregister(self, item: _dataT) -> None:
-        try:
-            self._items.remove(item)
-        except ValueError:
-            pass
+        self._items = [i for i in self._items if i is not item]
         self._check_ready()
 
     def clear(self) -> None:
